@@ -18,6 +18,7 @@ from sklearn.metrics import f1_score,roc_auc_score
 from chainer_chemistry.dataset.splitters.scaffold_splitter import ScaffoldSplitter
 from transformers import AutoTokenizer,AutoModel,BertModel,BertForPreTraining,BertConfig
 from smtokenization import SmilesTokenizer
+from rdkit import Chem
 
 class OldModel(nn.Module):
     def __init__(self, pt_model):
@@ -69,7 +70,7 @@ class Mole_dataset(Dataset):
         if tok:
             f = open(pth_text, 'r')
             self.data = f.readlines()
-            self.tokenizer = AutoTokenizer.from_pretrained('allenai/scibert_scivocab_uncased')
+            self.tokenizer = AutoTokenizer.from_pretrained('/root/KV-PLM/scibert')
             if rx:
                 self.tokenizer = SmilesTokenizer.from_pretrained('rxnfp/rxnfp/models/transformers/bert_mlm_1k_tpl')
 
@@ -104,7 +105,7 @@ def prepare_model_and_optimizer(args, device):
 
     modeling.ACT2FN["bias_gelu"] = modeling.bias_gelu_training
         
-    bert_model0 = BertForPreTraining.from_pretrained('allenai/scibert_scivocab_uncased')
+    bert_model0 = BertForPreTraining.from_pretrained('/root/KV-PLM/scibert')
     bert_model = OldModel(bert_model0)
     
     if args.init_checkpoint=='BERT':
@@ -221,6 +222,19 @@ def main(args):
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
 
+    def filter_valid_smiles(sm_list):
+        valid_idx = []
+        valid_smiles = []
+        for i, smi in enumerate(sm_list):
+            mol = Chem.MolFromSmiles(smi)
+            if mol is None:
+                continue
+            valid_idx.append(i)
+            valid_smiles.append(smi)
+        if len(valid_idx) != len(sm_list):
+            print('Filtered invalid SMILES:', len(sm_list) - len(valid_idx))
+        return np.array(valid_idx), np.array(valid_smiles)
+
     if args.task=='tox21':
         args.sm_pth = args.sm_pth + 'tox21.npy'
         args.pth_lab = args.pth_lab + 'tox21.npy'
@@ -244,7 +258,7 @@ def main(args):
         args.total_steps = 6000
         args.multi = 0
         sm_list = np.load(args.sm_pth)
-        seq = np.arange(len(sm_list))
+        seq, sm_list = filter_valid_smiles(sm_list)
         sp = ScaffoldSplitter()
         scaf = sp.train_valid_test_split(dataset=seq, smiles_list=sm_list, frac_train=0.8,
                                frac_valid=0.1, frac_test=0.1,include_chirality=False)
@@ -256,7 +270,7 @@ def main(args):
         args.total_steps = 300
         args.multi = 0
         sm_list = np.load(args.sm_pth)
-        seq = np.arange(len(sm_list))
+        seq, sm_list = filter_valid_smiles(sm_list)
         sp = ScaffoldSplitter()
         scaf = sp.train_valid_test_split(dataset=seq, smiles_list=sm_list, frac_train=0.8,
                                frac_valid=0.1, frac_test=0.1,include_chirality=False)
