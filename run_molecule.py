@@ -222,6 +222,28 @@ def main(args):
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
 
+    def task_to_kv_name(task):
+        lower = task.strip().lower()
+        if lower in ['tox21', 'sider']:
+            return lower
+        return task.strip().upper()
+
+    def load_external_split_indices(split_dir, task, split_mode):
+        kv_name = task_to_kv_name(task)
+        mode = split_mode.strip().lower()
+        train_path = os.path.join(split_dir, f"split_{kv_name}_{mode}_train.npy")
+        valid_path = os.path.join(split_dir, f"split_{kv_name}_{mode}_valid.npy")
+        test_path = os.path.join(split_dir, f"split_{kv_name}_{mode}_test.npy")
+        if not (os.path.isfile(train_path) and os.path.isfile(valid_path) and os.path.isfile(test_path)):
+            raise FileNotFoundError(
+                f"Split indices not found: {train_path}, {valid_path}, {test_path}"
+            )
+        return [
+            np.load(train_path),
+            np.load(valid_path),
+            np.load(test_path),
+        ]
+
     def filter_valid_smiles(sm_list):
         valid_idx = []
         valid_smiles = []
@@ -235,6 +257,8 @@ def main(args):
             print('Filtered invalid SMILES:', len(sm_list) - len(valid_idx))
         return np.array(valid_idx), np.array(valid_smiles)
 
+    use_external_split = args.split_idx_dir is not None
+
     if args.task=='tox21':
         args.sm_pth = args.sm_pth + 'tox21.npy'
         args.pth_lab = args.pth_lab + 'tox21.npy'
@@ -242,14 +266,18 @@ def main(args):
         args.pth_text = args.pth_text + 'tox21.txt'
         args.total_steps = 1200
         args.multi = 12
-        sm_list = np.load(args.sm_pth)
-        seq = np.arange(len(sm_list))
-        np.random.shuffle(seq)
-        scaf = []
-        k = int(len(seq)/10)
-        scaf.append(seq[:8*k])
-        scaf.append(seq[8*k:9*k])
-        scaf.append(seq[9*k:])
+        sm_list = np.load(args.sm_pth, allow_pickle=True)
+        if use_external_split:
+            scaf = load_external_split_indices(args.split_idx_dir, args.task, args.split_mode)
+            print('Loaded external split indices for tox21.')
+        else:
+            seq = np.arange(len(sm_list))
+            np.random.shuffle(seq)
+            scaf = []
+            k = int(len(seq)/10)
+            scaf.append(seq[:8*k])
+            scaf.append(seq[8*k:9*k])
+            scaf.append(seq[9*k:])
     elif args.task=='HIV':
         args.sm_pth = args.sm_pth + 'HIV.npy'
         args.pth_lab = args.pth_lab + 'HIV.npy'
@@ -257,11 +285,15 @@ def main(args):
         args.pth_text = args.pth_text + 'HIV.txt'
         args.total_steps = 6000
         args.multi = 0
-        sm_list = np.load(args.sm_pth)
-        seq, sm_list = filter_valid_smiles(sm_list)
-        sp = ScaffoldSplitter()
-        scaf = sp.train_valid_test_split(dataset=seq, smiles_list=sm_list, frac_train=0.8,
-                               frac_valid=0.1, frac_test=0.1,include_chirality=False)
+        sm_list = np.load(args.sm_pth, allow_pickle=True)
+        if use_external_split:
+            scaf = load_external_split_indices(args.split_idx_dir, args.task, args.split_mode)
+            print('Loaded external split indices for HIV.')
+        else:
+            seq, sm_list = filter_valid_smiles(sm_list)
+            sp = ScaffoldSplitter()
+            scaf = sp.train_valid_test_split(dataset=seq, smiles_list=sm_list, frac_train=0.8,
+                                   frac_valid=0.1, frac_test=0.1,include_chirality=False)
     elif args.task=='BBBP':
         args.sm_pth = args.sm_pth + 'BBBP.npy'
         args.pth_lab = args.pth_lab + 'BBBP.npy'
@@ -269,11 +301,15 @@ def main(args):
         args.pth_text = args.pth_text + 'BBBP.txt'
         args.total_steps = 300
         args.multi = 0
-        sm_list = np.load(args.sm_pth)
-        seq, sm_list = filter_valid_smiles(sm_list)
-        sp = ScaffoldSplitter()
-        scaf = sp.train_valid_test_split(dataset=seq, smiles_list=sm_list, frac_train=0.8,
-                               frac_valid=0.1, frac_test=0.1,include_chirality=False)
+        sm_list = np.load(args.sm_pth, allow_pickle=True)
+        if use_external_split:
+            scaf = load_external_split_indices(args.split_idx_dir, args.task, args.split_mode)
+            print('Loaded external split indices for BBBP.')
+        else:
+            seq, sm_list = filter_valid_smiles(sm_list)
+            sp = ScaffoldSplitter()
+            scaf = sp.train_valid_test_split(dataset=seq, smiles_list=sm_list, frac_train=0.8,
+                                   frac_valid=0.1, frac_test=0.1,include_chirality=False)
     elif args.task=='sider':
         args.sm_pth = args.sm_pth + 'sider.npy'
         args.pth_lab = args.pth_lab + 'sider.npy'
@@ -281,14 +317,18 @@ def main(args):
         args.pth_text = args.pth_text + 'sider.txt'
         args.total_steps = 200
         args.multi = 27
-        sm_list = np.load(args.sm_pth)
-        seq = np.arange(len(sm_list))
-        np.random.shuffle(seq)
-        scaf = []
-        k = int(len(seq)/10)
-        scaf.append(seq[:8*k])
-        scaf.append(seq[8*k:9*k])
-        scaf.append(seq[9*k:])
+        sm_list = np.load(args.sm_pth, allow_pickle=True)
+        if use_external_split:
+            scaf = load_external_split_indices(args.split_idx_dir, args.task, args.split_mode)
+            print('Loaded external split indices for sider.')
+        else:
+            seq = np.arange(len(sm_list))
+            np.random.shuffle(seq)
+            scaf = []
+            k = int(len(seq)/10)
+            scaf.append(seq[:8*k])
+            scaf.append(seq[8*k:9*k])
+            scaf.append(seq[9*k:])
     
     model, optimizer = prepare_model_and_optimizer(args, device)
     
@@ -391,6 +431,8 @@ def parse_args(parser=argparse.ArgumentParser()):
     parser.add_argument("--epoch", default=20, type=int,)
     parser.add_argument("--seed", default=1011, type=int,)
     parser.add_argument("--output", default='finetune_save/ckpt_test1.pt', type=str,)
+    parser.add_argument("--split_idx_dir", default=None, type=str,)
+    parser.add_argument("--split_mode", default="scaffold", choices=["scaffold", "random_scaffold"], type=str,)
     args = parser.parse_args()
     return args
 
