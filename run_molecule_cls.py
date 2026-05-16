@@ -1,3 +1,4 @@
+# 这一版代码能够保证分类任务正确运行
 import argparse
 import pickle
 import os
@@ -41,18 +42,16 @@ class OldModel(nn.Module):
         return self.ptmodel.bert(inputs_embeds=embs, attention_mask=attention_mask, token_type_ids=token_type_ids)
 
 class BigModel(nn.Module):
-    def __init__(self, bert_model, config, multi, task_type="classification"):
+    def __init__(self, bert_model, config, multi):
         super(BigModel, self).__init__()
         self.bert = bert_model
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        # Determine output dimension: 1 for regression, 2 for classification
-        output_dim = 1 if task_type == "regression" else 2
         if multi==0:
-            self.classifier = nn.Linear(config.hidden_size, output_dim)
+            self.classifier = nn.Linear(config.hidden_size, 2)
         else:
             self.classifier = []
             for i in range(multi):
-                self.classifier.append(nn.Linear(config.hidden_size, output_dim))
+                self.classifier.append(nn.Linear(config.hidden_size, 2))
             self.classifier = nn.ModuleList(self.classifier)
         self.multi = multi
 
@@ -101,7 +100,7 @@ class Mole_dataset(Dataset):
         
         return torch.tensor(dat.copy()).long(), torch.tensor(lab.copy()).long(),torch.tensor(att.copy()).long()
         
-def prepare_model_and_optimizer(args, device, task_type="classification"):
+def prepare_model_and_optimizer(args, device):
     config = modeling.BertConfig.from_json_file(args.config_file)
     if config.vocab_size % 8 != 0:
         config.vocab_size += 8 - (config.vocab_size % 8)
@@ -115,29 +114,29 @@ def prepare_model_and_optimizer(args, device, task_type="classification"):
         con = BertConfig(vocab_size=31090,)
         bert_model = BertModel(con)
         args.tok = 1
-        model = BigModel(bert_model, config, args.multi, task_type=task_type)
+        model = BigModel(bert_model, config, args.multi)
     elif args.init_checkpoint=='rxnfp':
         bert_model =  BertModel.from_pretrained('rxnfp/transformers/bert_mlm_1k_tpl')
         args.pth_data += 'rxnfp/'
         config.hidden = 256
         args.tok = 1
-        model = BigModel(bert_model, config, args.multi, task_type=task_type)
+        model = BigModel(bert_model, config, args.multi)
         args.rx = 1
     elif args.init_checkpoint is None:
         args.tok = 1
-        model = BigModel(bert_model0.bert, config, args.multi, task_type=task_type)
+        model = BigModel(bert_model0.bert, config, args.multi)
     else:
         pt = torch.load(args.init_checkpoint)
         if 'module.ptmodel.bert.embeddings.word_embeddings.weight' in pt:
             pretrained_dict = {k[7:]: v for k, v in pt.items()}
             args.tok = 0
             bert_model.load_state_dict(pretrained_dict, strict=False)
-            model = BigModel(bert_model, config, args.multi, task_type=task_type)
+            model = BigModel(bert_model, config, args.multi)
         elif 'bert.embeddings.word_embeddings.weight' in pt:
             #pretrained_dict = {k[5:]: v for k, v in pt.items()}
             args.tok = 1
             bert_model0.load_state_dict(pt, strict=True)
-            model = BigModel(bert_model0.bert, config, args.multi, task_type=task_type)
+            model = BigModel(bert_model0.bert, config, args.multi)
     #model = torch.nn.DataParallel(model)
     model.to(device)
     param_optimizer = list(model.named_parameters())
@@ -220,8 +219,7 @@ def Eval(model, dataloader, multi, eval_metric_fn, eval_metric_multitask_fn, tas
                     y_pro_list.append(y_pred_batch.cpu().numpy())
                 else:
                     y_true_list.append(lab.cpu().numpy())
-                    # For single-task regression, squeeze (batch_size, 1) to (batch_size,)
-                    y_pro_list.append(logits.squeeze(-1).cpu().numpy())
+                    y_pro_list.append(logits.cpu().numpy())
             else:
                 # Classification: apply sigmoid and convert to probabilities
                 if multi > 0:
@@ -438,7 +436,7 @@ def main(args):
                 scaf.append(seq[8*k:9*k])
                 scaf.append(seq[9*k:])
 
-    model, optimizer = prepare_model_and_optimizer(args, device, task_type=task_type)
+    model, optimizer = prepare_model_and_optimizer(args, device)
     
     TrainSet = Mole_dataset(args.pth_data, args.pth_lab, args.pth_text, scaf[0], args.tok, args.rx)
     DevSet = Mole_dataset(args.pth_data, args.pth_lab, args.pth_text, scaf[1], args.tok, args.rx)
@@ -491,8 +489,7 @@ def main(args):
             if task_type == "regression":
                 # Regression task: logits are predictions, apply MSE loss
                 if args.multi == 0:
-                    # Single-task regression: logits shape is (batch_size, 1), squeeze to (batch_size,)
-                    loss = loss_func(logits.squeeze(-1).float(), lab.cuda().float())
+                    loss = loss_func(logits.view(-1), lab.cuda().view(-1))
                 else:
                     loss = torch.tensor(0.0).cuda()
                     for i in range(len(logits)):
@@ -500,8 +497,8 @@ def main(args):
                             if lab[j, i].item() == -1:
                                 continue
                             loss += loss_func(
-                                logits[i][j].unsqueeze(0).float(),
-                                lab[j, i].cuda().float().unsqueeze(0),
+                                logits[i][j].unsqueeze(0),
+                                lab[j, i].cuda().unsqueeze(0),
                             )
             else:
                 # Classification task: apply CrossEntropy loss
