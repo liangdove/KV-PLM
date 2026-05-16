@@ -4,6 +4,7 @@ import os
 import random
 import json
 import time
+import sys
 import numpy as np
 import torch
 import torch.nn as nn
@@ -164,56 +165,52 @@ def prepare_model_and_optimizer(args, device):
             )
     return model,optimizer
 
-def Eval(model, dataloader, multi):
+
+def _add_chemvl_private_to_path(chemvl_private_root: str) -> None:
+    chemvl_private_root = os.path.abspath(chemvl_private_root)
+    if chemvl_private_root not in sys.path:
+        sys.path.insert(0, chemvl_private_root)
+
+
+def _select_primary_metric(metrics_dict):
+    for key in ["ROCAUC", "RMSE", "MAE", "R2"]:
+        if key in metrics_dict:
+            return float(metrics_dict[key])
+    raise KeyError("No supported primary metric found in metrics dict.")
+
+def Eval(model, dataloader, multi, eval_metric_fn, eval_metric_multitask_fn):
     model.eval()
     with torch.no_grad():
         acc = 0
         allcnt = 0
-        y_true = None
-        y_score = None
+        y_true_list = []
+        y_pro_list = []
         for batch in tqdm(dataloader):
             (tok, lab, att) = batch
             typ = torch.zeros(tok.shape).long().cuda()
             logits = model(tok.cuda(), token_type_ids=typ, attention_mask=att.cuda())
             
             if multi>0:
-                if y_true is None:
-                    y_true = torch.transpose(lab,1,0)
-                    y_score = torch.nn.Sigmoid()(logits[0][:,1]-logits[0][:,0]).unsqueeze(0)
-                    for i in range(1, len(logits)):
-                        y_score = torch.cat( (y_score, torch.nn.Sigmoid()(logits[i][:,1]-logits[i][:,0]).unsqueeze(0)), axis=0 )
-                else:
-                    y_true = torch.cat((y_true, torch.transpose(lab,1,0) ), axis=1)
-                    y_score1 = torch.nn.Sigmoid()(logits[0][:,1]-logits[0][:,0]).unsqueeze(0)
-                    for i in range(1, len(logits)):
-                        y_score1 = torch.cat( (y_score1, torch.nn.Sigmoid()(logits[i][:,1]-logits[i][:,0]).unsqueeze(0)), axis=0 )
-                    y_score = torch.cat( (y_score, y_score1.clone()), axis=1 )
+                y_true_list.append(lab.cpu().numpy())
+                y_score = torch.nn.Sigmoid()(logits[0][:,1]-logits[0][:,0]).unsqueeze(0)
+                for i in range(1, len(logits)):
+                    y_score = torch.cat(
+                        (y_score, torch.nn.Sigmoid()(logits[i][:,1]-logits[i][:,0]).unsqueeze(0)),
+                        axis=0,
+                    )
+                y_pro_list.append(y_score.transpose(0, 1).cpu().numpy())
             else:
-                if y_true is None:
-                    y_true = lab
-                    y_score =  torch.nn.Sigmoid()(logits[:,1]-logits[:,0])
-                else:
-                    y_true = torch.cat( (y_true, lab), axis=0 )
-                    y_score = torch.cat( (y_score, torch.nn.Sigmoid()(logits[:,1]-logits[:,0])), axis=0 )
+                y_true_list.append(lab.cpu().numpy())
+                y_score = torch.nn.Sigmoid()(logits[:,1]-logits[:,0]).unsqueeze(1)
+                y_pro_list.append(y_score.cpu().numpy())
     
-    if multi==0:
-        return roc_auc_score(y_true.squeeze().cpu(), y_score.squeeze().cpu())
-    else:
-        alltrue = y_true.view(-1,1).squeeze()
-        allscore = y_score.view(-1,1).squeeze()
-        finaltrue = None
-        finalscore = None
-        
-        for i in range(len(alltrue)):
-            if alltrue[i].item()==-1:
-                continue
-            if finaltrue is None:
-                finaltrue = alltrue[i].unsqueeze(0)
-                finalscore = allscore[i].unsqueeze(0)
-            else:
-                finaltrue = torch.cat((finaltrue, alltrue[i].unsqueeze(0)), axis=0)
-                finalscore = torch.cat((finalscore, allscore[i].unsqueeze(0)), axis=0)
-        return roc_auc_score(finaltrue.squeeze().cpu(), finalscore.squeeze().cpu())
+    y_true = np.concatenate(y_true_list, axis=0)
+    y_pro = np.concatenate(y_pro_list, axis=0)
+    y_pred = (y_pro >= 0.5).astype(int)
+
+    if multi == 0:
+        return eval_metric_fn(y_true.squeeze(), y_pred.squeeze(), y_pro.squeeze(), empty=-1)
+    return eval_metric_multitask_fn(y_true, y_pred, y_pro, num_tasks=y_true.shape[1], empty=-1)
     
 def main(args):
     device = torch.device('cuda')
@@ -221,6 +218,34 @@ def main(args):
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
+
+    # Resolve chemvl_private_root with fallbacks if provided path doesn't exist
+    candidates = []
+    if args.chemvl_private_root:
+        candidates.append(os.path.abspath(args.chemvl_private_root))
+        candidates.append(os.path.abspath(os.path.join(os.getcwd(), args.chemvl_private_root)))
+    # sibling path relative to KV-PLM repo dir
+    candidates.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'ChemVL-private')))
+    # parent of workspace
+    candidates.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'ChemVL-private')))
+    # common absolute path used in this environment
+    candidates.append('/home/administrator/code_liangdove/ChemVL-private')
+
+    chemvl_root_resolved = None
+    for c in candidates:
+        if c and os.path.isdir(c):
+            chemvl_root_resolved = c
+            break
+
+    if chemvl_root_resolved is None:
+        print("Warning: could not locate ChemVL-private directory from candidates:\n" + "\n".join([str(x) for x in candidates]))
+        print("Please pass a valid --chemvl_private_root path (absolute or relative).\nFalling back to args.chemvl_private_root as given.")
+        chemvl_root_resolved = args.chemvl_private_root
+
+    print(f"Using ChemVL-private root: {chemvl_root_resolved}")
+    _add_chemvl_private_to_path(chemvl_root_resolved)
+    from models.evaluate import metric as chemvl_metric
+    from models.evaluate import metric_multitask as chemvl_metric_multitask
 
     def task_to_kv_name(task):
         lower = task.strip().lower()
@@ -353,10 +378,11 @@ def main(args):
         if tag==False:
             break
         
-        acc = Eval(model, dev_dataloader, args.multi)
-        print('Epoch:', epoch, ', DevAcc:', acc)
-        if acc>best_acc:
-            best_acc = acc
+        dev_metrics = Eval(model, dev_dataloader, args.multi, chemvl_metric, chemvl_metric_multitask)
+        dev_score = _select_primary_metric(dev_metrics)
+        print('Epoch:', epoch, ', DevMetric:', dev_metrics)
+        if dev_score>best_acc:
+            best_acc = dev_score
             torch.save(model.state_dict(), args.output)
             print('Save checkpoint ', global_step)
         
@@ -400,15 +426,16 @@ def main(args):
         optimizer.zero_grad()
         print('Epoch:', epoch, ', Loss:', sumloss/allcnt)
 
-    acc = Eval(model, dev_dataloader, args.multi)
-    print('Epoch:', args.epoch, ', DevAcc:', acc)
-    if acc>best_acc:
-        best_acc = acc
+    dev_metrics = Eval(model, dev_dataloader, args.multi, chemvl_metric, chemvl_metric_multitask)
+    dev_score = _select_primary_metric(dev_metrics)
+    print('Epoch:', args.epoch, ', DevMetric:', dev_metrics)
+    if dev_score>best_acc:
+        best_acc = dev_score
         torch.save(model.state_dict(), args.output)
         print('Save checkpoint ', global_step)
     model.load_state_dict(torch.load(args.output))
-    acc = Eval(model, test_dataloader, args.multi)
-    print('Test Acc:', acc)
+    test_metrics = Eval(model, test_dataloader, args.multi, chemvl_metric, chemvl_metric_multitask)
+    print('Test Metric:', test_metrics)
 
 def parse_args(parser=argparse.ArgumentParser()):
     parser.add_argument("--config_file", default='bert_base_config.json', type=str,)
@@ -433,6 +460,11 @@ def parse_args(parser=argparse.ArgumentParser()):
     parser.add_argument("--output", default='finetune_save/ckpt_test1.pt', type=str,)
     parser.add_argument("--split_idx_dir", default=None, type=str,)
     parser.add_argument("--split_mode", default="scaffold", choices=["scaffold", "random_scaffold"], type=str,)
+    parser.add_argument(
+        "--chemvl_private_root",
+        default="ChemVL-private",
+        type=str,
+    )
     args = parser.parse_args()
     return args
 
